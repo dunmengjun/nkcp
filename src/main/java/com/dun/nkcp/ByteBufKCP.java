@@ -494,6 +494,51 @@ public class ByteBufKCP {
         recvCallback.recv(byteBufs);
     }
 
+
+    //---------------------------------------------------------------------
+    // user/upper level send, returns below zero for error
+    //---------------------------------------------------------------------
+    // 上层要发送的数据丢给发送队列，发送队列会根据mtu大小分片
+    public int Send(ByteBuf buffer) {
+
+        if (0 == buffer.readableBytes()) {
+            return -1;
+        }
+
+        int count;
+
+        // 根据mss大小分片
+        if (buffer.readableBytes() < mss) {
+            count = 1;
+        } else {
+            count = (int) (buffer.readableBytes() + mss - 1) / (int) mss;
+        }
+
+        if (255 < count) {
+            return -2;
+        }
+
+        if (0 == count) {
+            count = 1;
+        }
+
+        int offset = 0;
+
+        // 分片后加入到发送队列
+        int length = buffer.readableBytes();
+        for (int i = 0; i < count; i++) {
+            int size = (int) (length > mss ? mss : length);
+            buffer.readBytes(size);
+            Segment seg = new Segment(size);
+            System.arraycopy(buffer, offset, seg.data, 0, size);
+            offset += size;
+            seg.frg = count - i - 1;
+            nsnd_que.add(seg);
+            length -= size;
+        }
+        return 0;
+    }
+
     /**
      * 底层收包后调用，再由上层通过Recv获得处理后的数据
      * @param data
