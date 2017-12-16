@@ -1,9 +1,7 @@
 package com.dun.nkcp;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
-import io.netty.buffer.ByteBufHolder;
-import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.*;
+import io.netty.util.ReferenceCountUtil;
 
 import java.io.UnsupportedEncodingException;
 
@@ -19,6 +17,12 @@ public class Main {
             byteBuf.getBytes(0,copyArray);
             System.out.println(new String(copyArray,"UTF-8"));
         }
+        //丢弃读过的字节
+        byteBuf.discardReadBytes();
+        //在读索引超过一半的时候才进行前移操作
+        byteBuf.discardSomeReadBytes();
+        byteBuf.release();
 
+        CompositeByteBuf compositeByteBuf = byteBufAllocator.compositeBuffer(20);
     }
 }

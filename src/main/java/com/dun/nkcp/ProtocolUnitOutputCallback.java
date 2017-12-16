@@ -1,4 +1,5 @@
 package com.dun.nkcp;
 
-public class ProtocolUnitOutputCallback {
+public interface ProtocolUnitOutputCallback {
+
 }
