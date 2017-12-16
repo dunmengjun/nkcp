@@ -3,7 +3,6 @@ package com.dun.nkcp;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
-import io.netty.util.ReferenceCountUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,6 +57,29 @@ public class ByteBufKCP {
 
     public final int IKCP_THRESH_INIT = 2;
 
+    public final int IKCP_INTERVAL = 100;
+
+    public final int IKCP_THRESH_MIN = 2;
+
+    public final int IKCP_DEADLINK = 10;
+
+    public final int IKCP_WND_SND = 32;
+
+    /**
+     * need to send IKCP_CMD_WASK
+     */
+    public final int IKCP_ASK_SEND = 1;
+
+    /**
+     * up to 120 secs to probe window
+     */
+    public final int IKCP_PROBE_LIMIT = 120000;
+
+    /**
+     * 7 secs to probe window size
+     */
+    public final int IKCP_PROBE_INIT = 7000;
+
     /**
      *  第一个未确认的包
      */
@@ -98,6 +120,18 @@ public class ByteBufKCP {
      * 可发送的最大数据量
      */
     long incr = 0;
+
+    long state = 0;
+
+    long nodelay = 0;
+
+    long xmit = 0;
+
+    long fastResend = 0;
+
+    long nocWnd = 0;
+
+    long sndWnd = IKCP_WND_SND;
     /**
      * 拥塞窗口阈值
      */
@@ -126,6 +160,20 @@ public class ByteBufKCP {
      * 远端接收窗口大小
      */
     long rmtWnd = IKCP_WND_RCV;
+
+    long updated = 0;
+
+    long tsFlush = IKCP_INTERVAL;
+
+    long interval = IKCP_INTERVAL;
+
+    long deadLink = IKCP_DEADLINK;
+
+    long tsProbe = 0;
+
+    long probeWait = 0;
+
+    ByteBuf buffer = null;
     /**
      * 发送消息的缓存
      */
@@ -143,6 +191,11 @@ public class ByteBufKCP {
      */
     List<Segment> nrcvQue = new ArrayList<>(128);
 
+    /**
+     * 发送数据包队列
+     */
+    ArrayList<Segment> nsndQue = new ArrayList<>(128);
+
 
     private ByteBufAllocator bufAllocator;
 
@@ -154,6 +207,7 @@ public class ByteBufKCP {
     public ByteBufKCP(ByteBufAllocator byteBufAllocator,int conv){
         this.bufAllocator = byteBufAllocator;
         this.conv = conv;
+        this.buffer = byteBufAllocator.directBuffer((int) (mtu + IKCP_OVERHEAD) * 3);
     }
 
     public void setRecvCallback(ProtocolUnitRecvCallback recvCallback) {
@@ -184,65 +238,67 @@ public class ByteBufKCP {
         }
 
         /**
-         * encode a segment into buffer
+         * 编码24个字节头部
          * @param ptr
-         * @param offset
          * @return
          */
-        protected int encode(ByteBuf ptr, int offset) {
-            int offset_ = offset;
-            iKcpEncode32u(ptr, offset, conv);
-            offset += 4;
-            ikcp_encode8u(ptr, offset, (byte) cmd);
-            offset += 1;
-            ikcp_encode8u(ptr, offset, (byte) frg);
-            offset += 1;
-            iKcpEncode16u(ptr, offset, (int) wnd);
-            offset += 2;
-            iKcpEncode32u(ptr, offset, ts);
-            offset += 4;
-            iKcpEncode32u(ptr, offset, sn);
-            offset += 4;
-            iKcpEncode32u(ptr, offset, una);
-            offset += 4;
-            iKcpEncode32u(ptr, offset, (long) data.readableBytes());
-            offset += 4;
-            return offset - offset_;
+        protected int encode(ByteBuf ptr) {
+            //4个字节
+            iKcpEncode32u(ptr, conv);
+            //1个字节
+            ikcp_encode8u(ptr, (byte) cmd);
+            //1个字节
+            ikcp_encode8u(ptr, (byte) frg);
+            //2个字节
+            iKcpEncode16u(ptr, (int) wnd);
+            //4个字节
+            iKcpEncode32u(ptr, ts);
+            //4个字节
+            iKcpEncode32u(ptr, sn);
+            //4个字节
+            iKcpEncode32u(ptr, una);
+            //4个字节
+            iKcpEncode32u(ptr, (long) data.readableBytes());
+            return 24;
         }
     }
 
     /**
      * encode 32 bits unsigned int (msb)
      * @param data
-     * @param offset
      * @param l
      */
-    public static void iKcpEncode32u(ByteBuf data, int offset, long l) {
-        data.setByte(offset,(byte) (l >> 24));
-        data.setByte(offset + 1,(byte) (l >> 16));
-        data.setByte(offset + 2,(byte) (l >> 8));
-        data.setByte(offset + 3,(byte) (l >> 0));
+    public static void iKcpEncode32u(ByteBuf data,long l) {
+        data.writeByte((byte) (l >> 24));
+        data.writeByte((byte) (l >> 16));
+        data.writeByte((byte) (l >> 8));
+        data.writeByte((byte) (l >> 0));
+//        data.setByte(offset,(byte) (l >> 24));
+//        data.setByte(offset + 1,(byte) (l >> 16));
+//        data.setByte(offset + 2,(byte) (l >> 8));
+//        data.setByte(offset + 3,(byte) (l >> 0));
     }
 
     /**
      * encode 16 bits unsigned int (msb)
      * @param data
-     * @param offset
      * @param w
      */
-    public static void iKcpEncode16u(ByteBuf data, int offset, int w) {
-        data.setByte(offset,(byte) (w >> 8));
-        data.setByte(offset + 1,(byte) (w >> 0));
+    public static void iKcpEncode16u(ByteBuf data, int w) {
+        data.writeByte((byte) (w >> 8));
+        data.writeByte((byte) (w >> 0));
+//        data.setByte(offset,(byte) (w >> 8));
+//        data.setByte(offset + 1,(byte) (w >> 0));
     }
 
     /**
      * encode 8 bits unsigned int
      * @param data
-     * @param offset
      * @param c
      */
-    public static void ikcp_encode8u(ByteBuf data, int offset, byte c) {
-        data.setByte(offset,c);
+    public static void ikcp_encode8u(ByteBuf data, byte c) {
+        data.writeByte(c);
+//        data.setByte(offset,c);
     }
 
 
@@ -494,13 +550,263 @@ public class ByteBufKCP {
         recvCallback.recv(byteBufs);
     }
 
+    // 接收窗口可用大小
+    int wndUnused() {
+        if (nrcvQue.size() < rcvWnd) {
+            return (int) rcvWnd - nrcvQue.size();
+        }
+        return 0;
+    }
 
     //---------------------------------------------------------------------
-    // user/upper level send, returns below zero for error
+    // ikcp_flush
     //---------------------------------------------------------------------
-    // 上层要发送的数据丢给发送队列，发送队列会根据mtu大小分片
-    public int Send(ByteBuf buffer) {
+    void flush() {
+        long current_ = current;
+        int change = 0;
+        int lost = 0;
 
+        // 'ikcp_update' haven't been called.
+        if (0 == updated) {
+            return;
+        }
+
+        Segment seg = new Segment(bufAllocator.directBuffer(0));
+        seg.conv = conv;
+        seg.cmd = IKCP_CMD_ACK;
+        seg.wnd = (long) wndUnused();
+        seg.una = rcvNxt;
+
+        // 将acklist中的ack发送出去(这一段代码是发送ack的代码,ackList中的缓存全部发完)
+        int count = ackList.size() / 2;
+        int offset = 0;
+        for (int i = 0; i < count; i++) {
+            if (offset + IKCP_OVERHEAD > mtu) {
+                outputCallback.output(buffer);
+//                output(buffer, offset);
+                offset = 0;
+            }
+            // ikcp_ack_get
+            seg.sn = ackList.get(i * 2 + 0);
+            seg.ts = ackList.get(i * 2 + 1);
+            offset += seg.encode(buffer);
+        }
+        ackList.clear();
+
+        // probe window size (if remote window size equals zero)
+        // rmt_wnd=0时，判断是否需要请求对端接收窗口
+        if (0 == rmtWnd) {
+            if (0 == probeWait) {
+                probeWait = IKCP_PROBE_INIT;
+                tsProbe = current + probeWait;
+            } else {
+                // 逐步扩大请求时间间隔
+                if (iTimeDiff(current, tsProbe) >= 0) {
+                    if (probeWait < IKCP_PROBE_INIT) {
+                        probeWait = IKCP_PROBE_INIT;
+                    }
+                    probeWait += probeWait / 2;
+                    if (probeWait > IKCP_PROBE_LIMIT) {
+                        probeWait = IKCP_PROBE_LIMIT;
+                    }
+                    tsProbe = current + probeWait;
+                    probe |= IKCP_ASK_SEND;
+                }
+            }
+        } else {
+            tsProbe = 0;
+            probeWait = 0;
+        }
+
+        // flush window probing commands
+        // 请求对端接收窗口
+        if ((probe & IKCP_ASK_SEND) != 0) {
+            seg.cmd = IKCP_CMD_WASK;
+            if (offset + IKCP_OVERHEAD > mtu) {
+                outputCallback.output(buffer);
+                offset = 0;
+            }
+            offset += seg.encode(buffer);
+        }
+
+        // flush window probing commands(c#)
+        // 告诉对端自己的接收窗口
+        if ((probe & IKCP_ASK_TELL) != 0) {
+            seg.cmd = IKCP_CMD_WINS;
+            if (offset + IKCP_OVERHEAD > mtu) {
+                outputCallback.output(buffer);
+                offset = 0;
+            }
+            offset += seg.encode(buffer);
+        }
+
+        probe = 0;
+
+        // calculate window size
+        long cwnd_ = iMin(sndWnd, rmtWnd);
+        // 如果采用拥塞控制
+        if (0 == nocWnd) {
+            cwnd_ = iMin(cwnd, cwnd_);
+        }
+
+        count = 0;
+        // move data from snd_queue to snd_buf
+        for (Segment newseg : nsndQue) {
+            if (iTimeDiff(sndNxt, sndUna + cwnd_) >= 0) {
+                break;
+            }
+            newseg.conv = conv;
+            newseg.cmd = IKCP_CMD_PUSH;
+            newseg.wnd = seg.wnd;
+            newseg.ts = current_;
+            newseg.sn = sndNxt;
+            newseg.una = rcvNxt;
+            newseg.resendts = current_;
+            newseg.rto = rxRto;
+            newseg.fastack = 0;
+            newseg.xmit = 0;
+            nsndBuf.add(newseg);
+            sndNxt++;
+            count++;
+        }
+
+        if (0 < count) {
+            slice(nsndQue, count, nsndQue.size());
+        }
+
+        // calculate resent
+        long resent = (fastResend > 0) ? fastResend : 0xffffffff;
+        long rtomin = (nodelay == 0) ? (rxRto >> 3) : 0;
+        // flush data segments
+        for (Segment segMent : nsndBuf) {
+            boolean needsend = false;
+            if (0 == segMent.xmit) {
+                // 第一次传输
+                needsend = true;
+                segMent.xmit++;
+                segMent.rto = rxRto;
+                segMent.resendts = current_ + segMent.rto + rtomin;
+            } else if (iTimeDiff(current_, segMent.resendts) >= 0) {
+                // 丢包重传
+                needsend = true;
+                segMent.xmit++;
+                xmit++;
+                if (0 == nodelay) {
+                    segMent.rto += rxRto;
+                } else {
+                    segMent.rto += rxRto / 2;
+                }
+                segMent.resendts = current_ + segMent.rto;
+                lost = 1;
+            } else if (segMent.fastack >= resent) {
+                // 快速重传
+                needsend = true;
+                segMent.xmit++;
+                segMent.fastack = 0;
+                segMent.resendts = current_ + segMent.rto;
+                change++;
+            }
+
+            if (needsend) {
+                segMent.ts = current_;
+                segMent.wnd = seg.wnd;
+                segMent.una = rcvNxt;
+
+                int need = IKCP_OVERHEAD + segMent.data.readableBytes();
+                if (offset + need >= mtu) {
+                    outputCallback.output(buffer);
+                    offset = 0;
+                }
+
+                offset += segMent.encode(buffer);
+                if (segMent.data.readableBytes() > 0) {
+                    buffer.writeBytes(segMent.data);
+                    //System.arraycopy(segMent.data, 0, buffer, offset, segMent.data.length);
+                    offset += segMent.data.readableBytes();
+                }
+
+                if (segMent.xmit >= deadLink) {
+                    // state = 0(c#)
+                    state = -1;
+                }
+            }
+        }
+
+        // flash remain segments
+        if (offset > 0) {
+            outputCallback.output(buffer);
+//            output(buffer, offset);
+        }
+
+        // update ssthresh
+        // 拥塞避免
+        if (change != 0) {
+            long inflight = sndNxt - sndUna;
+            ssthresh = inflight / 2;
+            if (ssthresh < IKCP_THRESH_MIN) {
+                ssthresh = IKCP_THRESH_MIN;
+            }
+            cwnd = ssthresh + resent;
+            incr = cwnd * mss;
+        }
+
+        if (lost != 0) {
+            ssthresh = cwnd / 2;
+            if (ssthresh < IKCP_THRESH_MIN) {
+                ssthresh = IKCP_THRESH_MIN;
+            }
+            cwnd = 1;
+            incr = mss;
+        }
+
+        if (cwnd < 1) {
+            cwnd = 1;
+            incr = mss;
+        }
+    }
+
+
+    /**
+     * update state (call it repeatedly, every 10ms-100ms), or you can ask
+     * ikcp_check when to call it again (without ikcp_input/_send calling).
+     *'current' - current timestamp in millisec.
+     * @param current_
+     */
+    public void update(long current_) {
+        current = current_;
+
+        // 首次调用Update
+        if (0 == updated) {
+            updated = 1;
+            tsFlush = current;
+        }
+
+        // 两次更新间隔
+        int slap = iTimeDiff(current, tsFlush);
+
+        // interval设置过大或者Update调用间隔太久
+        if (slap >= 10000 || slap < -10000) {
+            tsFlush = current;
+            slap = 0;
+        }
+
+        // flush同时设置下一次更新时间
+        if (slap >= 0) {
+            tsFlush += interval;
+            if (iTimeDiff(current, tsFlush) >= 0) {
+                tsFlush = current + interval;
+            }
+            flush();
+        }
+    }
+
+
+    /**
+     * 上层要发送的数据丢给发送队列，发送队列会根据mtu大小分片
+     * @param buffer
+     * @return
+     */
+    public int send(ByteBuf buffer) {
         if (0 == buffer.readableBytes()) {
             return -1;
         }
@@ -521,19 +827,13 @@ public class ByteBufKCP {
         if (0 == count) {
             count = 1;
         }
-
-        int offset = 0;
-
         // 分片后加入到发送队列
         int length = buffer.readableBytes();
         for (int i = 0; i < count; i++) {
             int size = (int) (length > mss ? mss : length);
-            buffer.readBytes(size);
-            Segment seg = new Segment(size);
-            System.arraycopy(buffer, offset, seg.data, 0, size);
-            offset += size;
+            Segment seg = new Segment(buffer.readBytes(size));
             seg.frg = count - i - 1;
-            nsnd_que.add(seg);
+            nsndQue.add(seg);
             length -= size;
         }
         return 0;
