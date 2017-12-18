@@ -1,7 +1,6 @@
 package com.dun.nkcp;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,7 +8,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 
-public class ByteBufKCP {
+public abstract class ByteBufKCP {
 
     private final Logger LOGGER = LoggerFactory.getLogger(ByteBufKCP.class);
     /**
@@ -64,6 +63,11 @@ public class ByteBufKCP {
     public final int IKCP_DEADLINK = 10;
 
     public final int IKCP_WND_SND = 32;
+
+    /**
+     * no delay min rto
+     */
+    public final int IKCP_RTO_NDL = 30;
 
     /**
      * need to send IKCP_CMD_WASK
@@ -173,7 +177,7 @@ public class ByteBufKCP {
 
     long probeWait = 0;
 
-    ByteBuf buffer = null;
+    protected ByteBuf buffer = null;
     /**
      * 发送消息的缓存
      */
@@ -197,17 +201,13 @@ public class ByteBufKCP {
     ArrayList<Segment> nsndQue = new ArrayList<>(128);
 
 
-    private ByteBufAllocator bufAllocator;
-
     private ProtocolUnitOutputCallback outputCallback;
 
     private ProtocolUnitRecvCallback recvCallback;
 
 
-    public ByteBufKCP(ByteBufAllocator byteBufAllocator,int conv){
-        this.bufAllocator = byteBufAllocator;
+    public ByteBufKCP(int conv){
         this.conv = conv;
-        this.buffer = byteBufAllocator.directBuffer((int) (mtu + IKCP_OVERHEAD) * 3);
     }
 
     public void setRecvCallback(ProtocolUnitRecvCallback recvCallback) {
@@ -246,9 +246,9 @@ public class ByteBufKCP {
             //4个字节
             iKcpEncode32u(ptr, conv);
             //1个字节
-            ikcp_encode8u(ptr, (byte) cmd);
+            iKcpEncode8u(ptr, (byte) cmd);
             //1个字节
-            ikcp_encode8u(ptr, (byte) frg);
+            iKcpEncode8u(ptr, (byte) frg);
             //2个字节
             iKcpEncode16u(ptr, (int) wnd);
             //4个字节
@@ -296,7 +296,7 @@ public class ByteBufKCP {
      * @param data
      * @param c
      */
-    public static void ikcp_encode8u(ByteBuf data, byte c) {
+    public static void iKcpEncode8u(ByteBuf data, byte c) {
         data.writeByte(c);
 //        data.setByte(offset,c);
     }
@@ -529,7 +529,7 @@ public class ByteBufKCP {
         }
 
         // merge fragment.
-        CompositeByteBuf byteBufs = bufAllocator.compositeBuffer();
+        CompositeByteBuf byteBufs = compositeBuffer(nrcvQue.size());
         for (Segment seg : nrcvQue) {
             byteBufs.addComponent(seg.data);
             if (0 == seg.frg) {
@@ -558,6 +558,141 @@ public class ByteBufKCP {
         return 0;
     }
 
+
+    //---------------------------------------------------------------------
+    // Determine when should you invoke ikcp_update:
+    // returns when you should invoke ikcp_update in millisec, if there
+    // is no ikcp_input/_send calling. you can call ikcp_update in that
+    // time, instead of call update repeatly.
+    // Important to reduce unnacessary ikcp_update invoking. use it to
+    // schedule ikcp_update (eg. implementing an epoll-like mechanism,
+    // or optimize ikcp_update when handling massive kcp connections)
+    //---------------------------------------------------------------------
+    public long check(long currentTemp) {
+
+        long tsFlushTemp = tsFlush;
+        long tmFlush = 0x7fffffff;
+        long tmPacket = 0x7fffffff;
+        long minimal;
+
+        if (0 == updated) {
+            return currentTemp;
+        }
+
+        if (iTimeDiff(currentTemp, tsFlushTemp) >= 10000 || iTimeDiff(currentTemp, tsFlushTemp) < -10000) {
+            tsFlushTemp = currentTemp;
+        }
+
+        if (iTimeDiff(currentTemp, tsFlushTemp) >= 0) {
+            return currentTemp;
+        }
+
+        tmFlush = iTimeDiff(tsFlushTemp, currentTemp);
+
+        for (Segment seg : nsndBuf) {
+            int diff = iTimeDiff(seg.resendts, currentTemp);
+            if (diff <= 0) {
+                return currentTemp;
+            }
+            if (diff < tmPacket) {
+                tmPacket = diff;
+            }
+        }
+
+        minimal = tmPacket < tmFlush ? tmPacket : tmFlush;
+        if (minimal >= interval) {
+            minimal = interval;
+        }
+
+        return currentTemp + minimal;
+    }
+
+
+    // change MTU size, default is 1400
+    public int setMtu(int newMtu) {
+        if (newMtu < 50 || newMtu < IKCP_OVERHEAD) {
+            return -1;
+        }
+
+        ByteBuf buf = byteBuffer((newMtu + IKCP_OVERHEAD) * 3);
+        if (null == buf) {
+            return -2;
+        }
+
+        mtu = (long) newMtu;
+        mss = mtu - IKCP_OVERHEAD;
+        buffer = buf;
+        return 0;
+    }
+
+    public int interval(int newInterval) {
+        if (newInterval > 5000) {
+            newInterval = 5000;
+        } else if (newInterval < 10) {
+            newInterval = 10;
+        }
+        interval = (long) newInterval;
+        return 0;
+    }
+
+    // fastest: ikcp_nodelay(kcp, 1, 20, 2, 1)
+    // nodelay: 0:disable(default), 1:enable
+    // interval: internal update timer interval in millisec, default is 100ms
+    // resend: 0:disable fast resend(default), 1:enable fast resend
+    // nc: 0:normal congestion control(default), 1:disable congestion control
+    public int noDelay(int nodelay_, int interval_, int resend_, int nc_) {
+
+        if (nodelay_ >= 0) {
+            nodelay = nodelay_;
+            if (nodelay_ != 0) {
+                rxMinrto = IKCP_RTO_NDL;
+            } else {
+                rxMinrto = IKCP_RTO_MIN;
+            }
+        }
+
+        if (interval_ >= 0) {
+            if (interval_ > 5000) {
+                interval_ = 5000;
+            } else if (interval_ < 10) {
+                interval_ = 10;
+            }
+            interval = interval_;
+        }
+
+        if (resend_ >= 0) {
+            fastResend = resend_;
+        }
+
+        if (nc_ >= 0) {
+            nocWnd = nc_;
+        }
+
+        return 0;
+    }
+
+    /**
+     * set maximum window size: sndwnd=32, rcvwnd=32 by default
+     * @param sndwnd
+     * @param rcvwnd
+     * @return
+     */
+    public int wndSize(int sndwnd, int rcvwnd) {
+        if (sndwnd > 0) {
+            sndWnd = (long) sndwnd;
+        }
+
+        if (rcvwnd > 0) {
+            rcvWnd = (long) rcvwnd;
+        }
+        return 0;
+    }
+
+
+    protected abstract ByteBuf byteBuffer(int size);
+
+    protected abstract CompositeByteBuf compositeBuffer(int size);
+
     //---------------------------------------------------------------------
     // ikcp_flush
     //---------------------------------------------------------------------
@@ -571,7 +706,8 @@ public class ByteBufKCP {
             return;
         }
 
-        Segment seg = new Segment(bufAllocator.directBuffer(0));
+
+        Segment seg = new Segment(byteBuffer(0));
         seg.conv = conv;
         seg.cmd = IKCP_CMD_ACK;
         seg.wnd = (long) wndUnused();
@@ -719,10 +855,10 @@ public class ByteBufKCP {
                 }
 
                 offset += segMent.encode(buffer);
-                if (segMent.data.readableBytes() > 0) {
+                int dataLength = segMent.data.readableBytes();
+                if (dataLength > 0) {
                     buffer.writeBytes(segMent.data);
-                    //System.arraycopy(segMent.data, 0, buffer, offset, segMent.data.length);
-                    offset += segMent.data.readableBytes();
+                    offset += dataLength;
                 }
 
                 if (segMent.xmit >= deadLink) {
