@@ -529,14 +529,15 @@ public abstract class ByteBufKCP {
         }
 
         // merge fragment.
-        CompositeByteBuf byteBufs = compositeBuffer(nrcvQue.size());
+        ByteBuf byteBuf = byteBuffer(16);
+        int count = 0;
         for (Segment seg : nrcvQue) {
-            byteBufs.addComponent(seg.data);
+            byteBuf.writeBytes(seg.data);
+            count ++;
             if (0 == seg.frg) {
                 break;
             }
         }
-        int count = byteBufs.numComponents();
         if (0 < count) {
             slice(nrcvQue, count, nrcvQue.size());
         }
@@ -547,7 +548,7 @@ public abstract class ByteBufKCP {
             probe |= IKCP_ASK_TELL;
         }
         //调用recv回调函数
-        recvCallback.recv(byteBufs);
+        recvCallback.recv(byteBuf);
     }
 
     // 接收窗口可用大小
@@ -981,6 +982,9 @@ public abstract class ByteBufKCP {
      * @return
      */
     public int input(ByteBuf data){
+        if(data.readableBytes() == 35){
+            System.out.println("324234");
+        }
         long sUna = sndUna;
         //判断接受到的数据长度是否 小于kcp最小数据包长度,如果不是,返回0
         if (data.readableBytes() < IKCP_OVERHEAD) {

@@ -22,10 +22,13 @@ public class ByteBufKCPTest {
 
         byteBufKCP.setOutputCallback(byteBuf -> simulator.send(byteBuf,null));
 
-        simulator.addRecvListener(buf -> byteBufKCP.input(buf));
+        simulator.addRecvListener(buf -> {
+            System.out.println("底层收到的包为:" + buf.readableBytes());
+            byteBufKCP.input(buf);
+        });
 
         byteBufKCP.setRecvCallback(byteBuf -> {
-            System.out.println("收到结果了size:" + byteBuf.readableBytes());
+            System.out.println("收到结果了:" + byteBuf.readCharSequence(byteBuf.readableBytes(),CharsetUtil.UTF_8));
         });
 
         ByteBuf buf = byteBufAllocator.directBuffer();

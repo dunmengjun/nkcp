@@ -36,7 +36,7 @@ public class SimpleLatencySimulator implements LatencySimulator {
 
     @Override
     public void send(ByteBuf buf, InetSocketAddress address) {
-        queue.offer(buf);
+        queue.offer(buf.readBytes(buf.readableBytes()));
     }
 
     @Override
