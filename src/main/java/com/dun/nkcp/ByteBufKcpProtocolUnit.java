@@ -7,10 +7,13 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
-public abstract class ByteBufKCP {
+public abstract class ByteBufKcpProtocolUnit {
 
-    private final Logger LOGGER = LoggerFactory.getLogger(ByteBufKCP.class);
+    private final Logger LOGGER = LoggerFactory.getLogger(ByteBufKcpProtocolUnit.class);
     /**
      * kcp 单数据包最小长度
      */
@@ -198,7 +201,7 @@ public abstract class ByteBufKCP {
     /**
      * 发送数据包队列
      */
-    ArrayList<Segment> nsndQue = new ArrayList<>(128);
+    List<Segment> nsndQue = new ArrayList<>(128);
 
 
     private ProtocolUnitOutputCallback outputCallback;
@@ -206,7 +209,7 @@ public abstract class ByteBufKCP {
     private ProtocolUnitRecvCallback recvCallback;
 
 
-    public ByteBufKCP(int conv){
+    public ByteBufKcpProtocolUnit(int conv){
         this.conv = conv;
     }
 
@@ -944,17 +947,17 @@ public abstract class ByteBufKCP {
      * @return
      */
     public int send(ByteBuf buffer) {
-        if (0 == buffer.readableBytes()) {
+        int length = buffer.readableBytes();
+        if (0 == length) {
             return -1;
         }
 
         int count;
-
         // 根据mss大小分片
-        if (buffer.readableBytes() < mss) {
+        if (length < mss) {
             count = 1;
         } else {
-            count = (int) (buffer.readableBytes() + mss - 1) / (int) mss;
+            count = (int) (length + mss - 1) / (int) mss;
         }
 
         if (255 < count) {
@@ -965,7 +968,6 @@ public abstract class ByteBufKCP {
             count = 1;
         }
         // 分片后加入到发送队列
-        int length = buffer.readableBytes();
         for (int i = 0; i < count; i++) {
             int size = (int) (length > mss ? mss : length);
             Segment seg = new Segment(buffer.readBytes(size));

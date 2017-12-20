@@ -5,11 +5,11 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 
-public class OutHeapByteBufKCP extends ByteBufKCP{
+public class OutHeapByteBufKcpProtocolUnit extends ByteBufKcpProtocolUnit {
 
     private ByteBufAllocator bufAllocator;
 
-    public OutHeapByteBufKCP(int conv) {
+    public OutHeapByteBufKcpProtocolUnit(int conv) {
         super(conv);
         this.bufAllocator = new PooledByteBufAllocator();
         this.buffer = byteBuffer((int) (mtu + IKCP_OVERHEAD) * 3);

@@ -18,7 +18,7 @@ public class ByteBufKCPTest {
 
     @Test
     public void testSend() throws InterruptedException {
-        ByteBufKCP byteBufKCP = new OutHeapByteBufKCP(1001);
+        ByteBufKcpProtocolUnit byteBufKCP = new OutHeapByteBufKcpProtocolUnit(1001);
 
         byteBufKCP.setOutputCallback(byteBuf -> simulator.send(byteBuf,null));
 
